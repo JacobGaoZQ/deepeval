@@ -1,5 +1,7 @@
 import requests
 
+requests.packages.urllib3.disable_warnings()
+
 API_BASE_URL = "https://api.samsungiotcloud.cn"
 LOCATION_ID = "f4b3af92-5826-416e-8e28-8b1c252912f1"
 API_HEADERS = {
@@ -7,11 +9,10 @@ API_HEADERS = {
     "Content-Type": "application/json"
 }
 
-
 # 加载该位置下的设备
 devices = []
 response = requests.get(
-    url=f"{API_BASE_URL}/locations/{LOCATION_ID}",
+    url=f"{API_BASE_URL}/devices?location={LOCATION_ID}",
     headers=API_HEADERS,
     verify=False
 )
@@ -52,5 +53,6 @@ for device in devices:
         device["state"] = response_json.get("state")
     except requests.exceptions.JSONDecodeError:
         print(f"Could not decode health response for device {device_id}")
+
+    print(device)
 # def load_device_control_cases():
-    
