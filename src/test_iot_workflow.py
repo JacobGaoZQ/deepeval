@@ -9,6 +9,7 @@ import uuid
 import json
 import re
 from deepeval.models.gpt_model import GPTModel
+from deepeval.models.openai_utils import GPTModel
 from deepeval.evaluate import assert_test
 from deepeval.metrics import GEval
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
@@ -157,11 +158,12 @@ cases = [
 ]
 ids = [c["id"] for c in cases_data]
 
-custom_model = GPTModel(
+# --- 实例化并使用 ---
+judge_model = JudgeLlmClient(
     model_name=JUDGE_MODEL,
     api_key=QWEN_API_KEY,
     base_url=QWEN_BASE_URL,
-    http_client=http_client
+    verify_ssl=False  # 这里设置跳过 SSL 验证
 )
 
 DEVICE_CONTROL_METRIC = GEval(
@@ -177,7 +179,7 @@ DEVICE_CONTROL_METRIC = GEval(
            - 如果状态矛盾（例如 ACTUAL 为 'off' 但 EXPECTED 为 '已打开'），则视为不一致（Fail）。
         """,
     threshold=0.7,
-    model=custom_model,
+    model=judge_model,
     evaluation_params=[
         LLMTestCaseParams.INPUT,
         LLMTestCaseParams.ACTUAL_OUTPUT,
