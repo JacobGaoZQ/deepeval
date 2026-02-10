@@ -27,7 +27,7 @@ API_HEADERS = {
 # 加载该位置下的设备
 devices = []
 response = requests.get(
-    url=f"{API_BASE_URL}/devices?location={LOCATION_ID}",
+    url=f"{API_BASE_URL}/devices?locationId={LOCATION_ID}",
     headers=API_HEADERS,
     verify=False
 )
@@ -88,8 +88,8 @@ async def get_case_response(prompt: str):
 
 def get_streaming_response(json_data, ssl_verify=False):
     full_content = []
-
-    with requests.post(PANDA_URL, json=json_data, stream=True, verify=ssl_verify) as r:
+    timeout_config = (10, 120)
+    with requests.post(PANDA_URL, json=json_data, stream=True, verify=ssl_verify, timeout=timeout_config) as r:
         for line in r.iter_lines():
             if line:
                 decoded = line.decode('utf-8').strip()
@@ -156,7 +156,7 @@ ids = [c["id"] for c in cases_data]
 
 # 多设备控制case初始化
 MULTI_DEVICES_TEST_PROMPT = f"""
-你是一个智能家居设备测试用例生成器。请根据用户提供的 **设备列表（JSON格式）**，为所有满足条件的在线设备生成**1个**多设备开关控制相关的测试用例，并严格按照以下结构化格式输出。
+你是一个智能家居设备测试用例生成器。请根据用户提供的 **设备列表（JSON格式）**，为所有满足条件的在线设备生成多设备开关控制相关的测试用例，并严格按照以下结构化格式输出。
 
 ### 设备筛选与能力判断规则：
 - 仅考虑 `state == "online"` 的设备。
@@ -185,7 +185,7 @@ MULTI_DEVICES_TEST_PROMPT = f"""
    - `command`（对应设备的自然语言指令，如上所述）
 
 ### 输出格式：
-- 输出必须是 **一个 JSON 数组**，仅包含 **1 个** 测试用例对象。
+- 输出必须是 **一个 JSON 数组**，仅包含 **5 个** 测试用例对象。
 - 不包含任何额外文本、注释或 Markdown。
 - 字段顺序不限，但必须包含 `id`、`command`、`steps`。
 
@@ -209,7 +209,7 @@ MULTI_DEVICES_TEST_PROMPT = f"""
   }}
 ]
 
-### 请基于以下设备列表生成 1 个符合上述规范的测试用例：
+### 请基于以下设备列表生成符合上述规范的测试用例：
 
 {devices}
 """
@@ -271,7 +271,8 @@ async def test_device_control(id: str, deviceId: str, command: str, capability: 
     status_response = requests.get(
         url=device_status_url,
         headers=API_HEADERS,
-        verify=False
+        verify=False,
+        timeout=60  # 建议加上超时控制
     )
     actual_output = ""
     if status_response.status_code == 200:
@@ -308,25 +309,36 @@ async def test_multi_device_control(id: str, command: str, steps: list):
     expected_output = get_streaming_response(params)
     # 调用st接口,获取实际值
     # 在这里调用其他接口，例如获取设备状态
-    actual_output = ""
-    for item in steps:
-        device_status_url = f"{API_BASE_URL}/devices/{item["deviceId"]}/status"
-        status_response = requests.get(
-            url=device_status_url,
-            headers=API_HEADERS,
-            verify=False
-        )
-        if status_response.status_code == 200:
-            data = status_response.json()
-            # 逐层安全获取，给定默认值 {} 防止 NoneType 报错
-            main_component = data.get("components", {}).get("main", {})
-            cap_data = main_component.get(item["capability"], {}).get(item["capability"], {})
+    # 初始化为一个列表，收集结果更高效
+    results = []
 
-            # 最终取到 value，如果没有则默认为空字符串或 None
-            value = cap_data.get("value", "")
-            actual_output = item["deviceId"] + value
-        else:
-            print(f"Failed to get status for device {deviceId}")
+    for item in steps:
+        device_id = item.get("deviceId")
+        capability = item.get("capability")
+        device_status_url = f"{API_BASE_URL}/devices/{device_id}/status"
+        try:
+            status_response = requests.get(
+                url=device_status_url,
+                headers=API_HEADERS,
+                verify=False,
+                timeout=60  # 建议加上超时控制
+            )
+            if status_response.status_code == 200:
+                data = status_response.json()
+                # 使用更优雅的嵌套获取方式
+                # 这里的 get 逻辑已经是安全的了
+                val = (data.get("components", {})
+                       .get("main", {})
+                       .get(capability, {})
+                       .get(capability, {})
+                       .get("value", "N/A"))
+                results.append(f"{device_id}: {val}")
+            else:
+                print(f"Failed to get status for device {device_id}. Status Code: {status_response.status_code}")
+        except Exception as e:
+            print(f"Error connecting to device {device_id}: {e}")
+    # 最终合并输出
+    actual_output = "\n".join(results)
 
     test_case = LLMTestCase(
         input=command,
