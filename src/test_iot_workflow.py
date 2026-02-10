@@ -8,6 +8,7 @@ import pytest
 import uuid
 import json
 import re
+from datetime import datetime
 from deepeval.evaluate import assert_test
 from deepeval.metrics import GEval
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
@@ -18,7 +19,7 @@ requests.packages.urllib3.disable_warnings()
 API_BASE_URL = "https://api.samsungiotcloud.cn"
 PANDA_URL = "http://120.26.206.98:8001/stream"
 LOCATION_ID = "f4b3af92-5826-416e-8e28-8b1c252912f1"
-PAT = "330cfc68-a2f2-4bf5-872b-40019fcc7c23"
+PAT = "1df26858-4faf-4e23-9bba-6c6bc4bdf93f"
 API_HEADERS = {
     "Authorization": f"Bearer {PAT}",
     "Content-Type": "application/json"
@@ -88,7 +89,7 @@ async def get_case_response(prompt: str):
 
 def get_streaming_response(json_data, ssl_verify=False):
     full_content = []
-    timeout_config = (10, 120)
+    timeout_config = (10, 360)
     with requests.post(PANDA_URL, json=json_data, stream=True, verify=ssl_verify, timeout=timeout_config) as r:
         for line in r.iter_lines():
             if line:
@@ -104,6 +105,24 @@ def get_streaming_response(json_data, ssl_verify=False):
 
 async def load_device_control_cases(prompt: str):
     return await get_case_response(prompt)
+
+
+def fetch_cases_auto(prompt):
+    raw_json = asyncio.run(load_device_control_cases(prompt))
+    data = json.loads(raw_json)
+
+    # 自动将字典的所有值转为元组
+    cases = [tuple(item.values()) for item in data]
+    ids = [item["id"] for item in data]
+
+    return cases, ids
+
+
+def to_timestamp(date_str):
+    if not date_str: return 0
+    # 假设格式是 "2024-05-20T10:00:00Z"，根据实际格式调整
+    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+    return int(dt.timestamp())
 
 
 # 单设备控制case初始化
@@ -216,14 +235,35 @@ MULTI_DEVICES_TEST_PROMPT = f"""
 
 raw_json = asyncio.run(load_device_control_cases(MULTI_DEVICES_TEST_PROMPT))
 multi_devices_cases_data = json.loads(raw_json)
-
-# 3. 准备满足 parametrize 格式的数据
-# 注意：parametrize 需要一个元组列表 [(id1, devId1, cmd1, cap1), ...]
 multi_devices_cases = [
     (c["id"], c["command"], c["steps"])
     for c in multi_devices_cases_data
 ]
 multi_ids = [c["id"] for c in multi_devices_cases_data]
+
+SCENE_PROMPT = f"""你是一位专业的智能家居测试用例生成器。请根据用户提供的设备列表，生成一组自然语言场景测试用例，并严格按照以下要求输出：
+
+### 输出要求：
+- 输出必须是一个 **JSON 数组**，不要包含任何额外文本、解释或 Markdown；
+- 每个数组元素是一个对象，包含以下三个字段：
+  - `"id"`: 唯一 ID，格式为 `"ai_test_N"`（N 从 1 开始连续编号）；
+  - `"command"`: 用户可能对智能助手说的自然语言指令（口语化、生活化，例如：“每天早上8点帮我打开窗帘”）；
+- 所有场景必须基于真实生活情境（如起床、离家、回家、睡眠、观影、做饭等）；
+- 每个场景必须涉及 **至少两个** 列表中的设备，并体现合理的联动逻辑（如时间触发、传感器联动、状态变化等）；
+- 覆盖多种触发类型：定时、人体/门窗/环境传感器状态变化、设备状态变化、手动触发等；
+- **严禁生成以下内容**：
+  - 语义重复的用例；
+  - 涉及设备列表中未提供设备的功能；
+  - 需要外部信息（如天气、日出时间）而设备无法获取的场景；
+  - 不合理或虚构的设备能力（如“空调播放音乐”）；
+- 生成 1 个高质量、多样化的用例。
+
+### 用户提供的设备列表：
+{devices}
+
+### 请直接输出符合上述要求的 JSON 数组："""
+
+scene_cases, scene_ids = fetch_cases_auto(SCENE_PROMPT)
 
 # --- 实例化并使用 ---
 judge_model = JudgeLlmClient(
@@ -252,6 +292,28 @@ DEVICE_CONTROL_METRIC = GEval(
         LLMTestCaseParams.ACTUAL_OUTPUT,
         LLMTestCaseParams.EXPECTED_OUTPUT,
     ]
+)
+
+SCENE_METRIC = GEval(
+    name="CheckSceneAgentOutput",
+    criteria="""判断生成的场景集合（actual_output）是否满足：
+        1. 【核心意图对齐】：在场景集合中，必须存在一个场景的 'scene_name' 与预期目标（expected_output）核心语义高度一致。
+        2. 【时间有效性】：该匹配场景的 'create_time' 或 'update_time' 必须处于当前参考时间的 180 秒（3分钟）以内。""",
+    evaluation_steps=[
+        "解析 actual_output 字符串，将其视为场景对象列表。",
+        "在列表中搜索与 expected_output（自然语言描述的场景）语义最匹配的场景项。",
+        "如果找不到任何语义相关的场景，直接给 0 分并说明：'未找到匹配场景'。",
+        "针对匹配到的场景，提取其时间戳，并与当前时间进行差值计算。",
+        "若时间差绝对值 > 180 秒，即便名称匹配，最终得分也不应超过 3 分",
+        "若名称匹配且时间在 3 分钟以内，给 8-10 分。"
+    ],
+    threshold=0.7,
+    model=judge_model,
+    evaluation_params=[
+        LLMTestCaseParams.INPUT,
+        LLMTestCaseParams.ACTUAL_OUTPUT,
+        LLMTestCaseParams.EXPECTED_OUTPUT
+    ],
 )
 
 
@@ -349,3 +411,59 @@ async def test_multi_device_control(id: str, command: str, steps: list):
     )
     print(f"command:{command}----expected_output:{expected_output}-----actual_output:{actual_output}")
     assert_test(test_case, metrics=[DEVICE_CONTROL_METRIC])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "id,command",
+    scene_cases,
+    ids=scene_ids
+)
+async def test_scene(id: str, command: str):
+    # 调用线上接口,获取期望值
+    params = {"prompt": command, "location_id": LOCATION_ID, "user_token": PAT, "request_id": str(uuid.uuid4())}
+    expected_output = get_streaming_response(params)
+    # 调用st接口,获取实际值
+    standardized_scenes = []
+
+    BEHAVIORS_API_HEADERS = {
+        "Authorization": f"Bearer {PAT}",
+        "Accept": "application/vnd.smartthings+json;v=20200501"
+    }
+    response = requests.get(
+        url=f"{API_BASE_URL}/behaviors?locationId={LOCATION_ID}",
+        headers=BEHAVIORS_API_HEADERS,
+        verify=False
+    )
+    if response.status_code == 200:
+        scene = response.json().get("items", [])
+        for item in scene:
+            standardized_scenes.append({
+                "name": item.get("name"),
+                "created_time": to_timestamp(item.get("dateCreated")),
+                "updated_time": to_timestamp(item.get("dateUpdated"))
+            })
+
+    response = requests.get(
+        url=f"{API_BASE_URL}/scenes?locationId={LOCATION_ID}",
+        headers=API_HEADERS,
+        verify=False
+    )
+    if response.status_code == 200:
+        scene2 = response.json().get("items", [])
+        for item in scene2:
+            standardized_scenes.append({
+                "name": item.get("sceneName"),
+                "created_time": item.get("createdDate"),
+                "updated_time": item.get("lastUpdatedDate")
+            })
+    actual_output = json.dumps(standardized_scenes, ensure_ascii=False, indent=2)
+    test_case = LLMTestCase(
+        input=command,
+        actual_output=actual_output,
+        expected_output=expected_output,
+        context=[],
+        name=id
+    )
+    print(f"command:{command}----expected_output:{expected_output}-----actual_output:{actual_output}")
+    assert_test(test_case, metrics=[SCENE_METRIC])
