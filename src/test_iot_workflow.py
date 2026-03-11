@@ -60,7 +60,7 @@ for device in devices:
     except requests.exceptions.JSONDecodeError:
         print(f"Could not decode health response for device {device_id}")
 
-QWEN_API_KEY = "sk-62c3f30ff4764eb9b3e1dc94bac59530"
+QWEN_API_KEY = "xxxxxxxxxxxx"
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 CASE_MODEL = "qwen3-max"
 JUDGE_MODEL = "qwen-flash"
